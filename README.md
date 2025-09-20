@@ -1,0 +1,1 @@
+ObsStart-up is a script for starting OBS and automatically starting full-screen projectors on specific screens. In this script, I'm starting three separate sceenes on 3 different screens, while also starting OBS and OBS-Center.
