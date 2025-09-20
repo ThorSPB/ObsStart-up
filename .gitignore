@@ -1,27 +1,22 @@
-/.venv
-/build
-/dist
-/obsLauncher.spec
-/obsLauncherConsole.spec
-/obsLauncherConsoleV1.4.spec
-/obsLauncherConsoleV1.6.spec
-/obsLauncherConsoleV1.7.spec
-/obsLaunchertV1.6.spec
-/obsLauncherV1.1.spec
-/obsLauncherV1.2.spec
-/obsLauncherV1.3.spec
-/obsLauncherV1.4.spec
-/obsLauncherV1.5.spec
-/obsLauncherV1.6.spec
-/obsStart.spec
-/obsStart2.py
-/obsStartV1.6.spec
-/obsStart_fixed.py
-/obsStart_fixed_v2.py
-/obsStart_fixed_v3.py
-/obsStart_fixed_v4.py
-/obsStart_fixed_v5.py
-/obsStart_fixed_v6.py
-/obsStart_fixed_v6.spec
-/obsStart_fixed_v7.py
-/psutil
+# Python virtual environment
+.venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor/IDE specific files
+.idea/
+.vscode/
+
+# Old script versions
+obsStart_fixed*.py
+obsStart2.py
+
+# Installed packages
+psutil

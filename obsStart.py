@@ -9,6 +9,7 @@ import psutil
 import ctypes
 from ctypes import wintypes
 from obsws_python import ReqClient
+import json
 
 # Configuration - Verify these match your OBS setup
 HOST = "localhost"
@@ -22,11 +23,7 @@ MONITOR_MODE = True  # Set to False for single run, True for continuous monitori
 CHECK_INTERVAL = 10  # Check every 10 seconds
 STARTUP_DELAY = 20   # Wait 30 seconds after startup before first check
 
-CONFIG = {
-    2: {"title": "Program (Projector)", "type": "program", "monitor": 3},
-    3: {"title": "Scene Projector (Proiector)", "type": "scene", "monitor": 1, "scene": "Proiector"},
-    4: {"title": "Scene Projector (TV Sala)", "type": "scene", "monitor": 4, "scene": "TV Sala"}
-}
+CONFIG = {}
 
 # FlashWindowEx setup
 FLASHW_STOP = 0
@@ -42,6 +39,40 @@ class FLASHWINFO(ctypes.Structure):
         ("uCount", wintypes.UINT),
         ("dwTimeout", wintypes.DWORD),
     ]
+
+def get_config_path():
+    """Returns the path to the configuration file in AppData."""
+    app_data = os.getenv('APPDATA')
+    config_dir = os.path.join(app_data, "ObsStartUp")
+    if not os.path.exists(config_dir):
+        os.makedirs(config_dir)
+    return os.path.join(config_dir, "config.json")
+
+def load_config():
+    """Loads the configuration from the JSON file, or creates it if it doesn't exist."""
+    global CONFIG
+    config_path = get_config_path()
+    default_config = {
+        "2": {"title": "Program (Projector)", "type": "program", "monitor": 3},
+        "3": {"title": "Scene Projector (Proiector)", "type": "scene", "monitor": 1, "scene": "Proiector"},
+        "4": {"title": "Scene Projector (TV Sala)", "type": "scene", "monitor": 4, "scene": "TV Sala"}
+    }
+
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                CONFIG = json.load(f)
+            print(f"✅ Loaded configuration from {config_path}")
+        except (json.JSONDecodeError, TypeError):
+            print(f"⚠️ Invalid JSON in {config_path}. Using default config.")
+            CONFIG = default_config
+            with open(config_path, 'w') as f:
+                json.dump(CONFIG, f, indent=4)
+    else:
+        print(f"📝 Configuration file not found. Creating default config at {config_path}")
+        CONFIG = default_config
+        with open(config_path, 'w') as f:
+            json.dump(CONFIG, f, indent=4)
 
 # Win32 constants for better window control
 user32 = ctypes.windll.user32
@@ -523,6 +554,7 @@ def run_single_check():
 
 def main():
     """Main function - chooses between single run or continuous monitoring"""
+    load_config()
     if MONITOR_MODE:
         run_single_check()
         monitor_projectors_continuously()
