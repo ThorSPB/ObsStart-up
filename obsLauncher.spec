@@ -3,10 +3,10 @@
 
 a = Analysis(
     ['obsStart.py'],
-    pathex=[],
+    pathex=['D:\\Projects\\ObsStart-up\\.venv\\Lib\\site-packages'],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['psutil'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='obsLauncherV1.7',
+    name='obsLauncherV1.8',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -35,5 +35,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['D:\\Projects\\ObsStart-up\\OBS_Studio_logo.ico'],
 )
