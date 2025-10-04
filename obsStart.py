@@ -124,6 +124,90 @@ def get_monitors_sorted():
     return sorted(monitors, key=lambda m: m['rcMonitor'].left)
 
 
+def get_primary_monitor_rect():
+    """
+    Finds the rectangle of the primary display monitor.
+    """
+    MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(wintypes.RECT), ctypes.c_double)
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+            ("szDevice", wintypes.WCHAR * 32)
+        ]
+
+    primary_rect = None
+    def enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+        nonlocal primary_rect
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(info)):
+            if info.dwFlags & 1: # MONITORINFOF_PRIMARY
+                primary_rect = info.rcMonitor
+                return 0 # Stop enumeration
+        return 1
+
+    ctypes.windll.user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(enum_proc), 0)
+    return primary_rect
+
+def check_and_correct_projector_positions():
+    """
+    Verifies that projectors are on the correct monitor and closes them if they are misplaced.
+    """
+    print("\n\U0001f50d Verifying projector positions...")
+    primary_rect = get_primary_monitor_rect()
+    if not primary_rect:
+        print("  \u26a0\ufe0f Could not identify the primary monitor. Skipping position check.")
+        return
+
+    open_projectors = get_obs_projector_windows()
+    if not open_projectors:
+        return # Nothing to check
+
+    # OBS Index 0 is the primary monitor, based on the user's test.
+    PRIMARY_MONITOR_OBS_INDEX = 0
+
+    for config_key, config in CONFIG.items():
+        # We only care about projectors that are NOT supposed to be on the primary monitor.
+        if config.get('monitor') == PRIMARY_MONITOR_OBS_INDEX:
+            continue
+
+        # Find the corresponding window for this config entry.
+        found_hwnd = None
+        for proj_window in open_projectors:
+            title_lower = proj_window['title'].lower()
+            is_match = False
+            if config["type"] == "program" and "program" in title_lower:
+                is_match = True
+            elif config["type"] == "scene":
+                scene_name = config["scene"].lower()
+                if scene_name in title_lower or scene_name.replace(" ", "") in title_lower.replace(" ", ""):
+                    is_match = True
+            
+            if is_match:
+                found_hwnd = proj_window['hwnd']
+                break
+        
+        if found_hwnd:
+            # We found the window, now check its position.
+            try:
+                window_rect = win32gui.GetWindowRect(found_hwnd)
+                
+                # Check if the window's center point is inside the primary monitor's rectangle.
+                window_center_x = (window_rect[0] + window_rect[2]) / 2
+                
+                if primary_rect.left <= window_center_x < primary_rect.right:
+                    # This window is on the primary monitor, but it shouldn't be.
+                    print(f"  \u26a0\ufe0f Misplaced projector detected: '{config['title']}' is on the primary monitor.")
+                    print(f"  Closing '{config['title']}' so it can be reopened correctly.")
+                    win32gui.PostMessage(found_hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception as e:
+                print(f"  \u26a0\ufe0f Could not verify position for '{config['title']}': {e}")
+
+
 def is_obs_running():
     """Check if OBS is already running and responsive"""
     try:
@@ -516,6 +600,10 @@ def monitor_projectors_continuously():
                             client = None
                             break
                 
+                # After attempting to open missing projectors, verify all positions.
+                time.sleep(1) # Give windows a moment to appear and settle.
+                check_and_correct_projector_positions()
+
             except Exception as e:
                 print(f"❌ Error during projector check: {e}")
                 client = None
@@ -566,11 +654,16 @@ def run_single_check():
         if open_missing_projectors_enhanced(client):
             time.sleep(2)
             success, projectors = verify_projectors_exist()
+
+            # Verify that projectors are on the correct monitors.
+            time.sleep(1)
+            check_and_correct_projector_positions()
+
             if success:
-                print("\n🌈 SUCCESS: All required projectors are now running!")
+                print("\n\U0001f308 SUCCESS: All required projectors are now running!")
             else:
-                print(f"\n⚠️ CHECK NEEDED: {len(projectors)} projectors currently running")
-                print("💡 Some projectors might not have opened properly")
+                print(f"\n\u26a0\ufe0f CHECK NEEDED: {len(projectors)} projectors currently running")
+                print("\U0001f4a1 Some projectors might not have opened properly")
         else:
             print("\n💥 FAILURE: Could not open missing projectors")
             
