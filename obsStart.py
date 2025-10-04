@@ -52,6 +52,8 @@ def load_config():
     """Loads the configuration from the JSON file, or creates it if it doesn't exist."""
     global CONFIG
     config_path = get_config_path()
+    # NOTE: The 'monitor' index in the config corresponds to the physical monitor's
+    # position, sorted from left to right (0 = leftmost, 1 = second from left, etc.).
     default_config = {
         "2": {"title": "Program (Projector)", "type": "program", "monitor": 3},
         "3": {"title": "Scene Projector (Proiector)", "type": "scene", "monitor": 1, "scene": "Proiector"},
@@ -81,6 +83,47 @@ VK_MENU = 0x12
 KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 
+
+def get_monitors_sorted():
+    """
+    Gets all display monitors and returns them sorted by their horizontal position.
+    """
+    monitors = []
+    MonitorEnumProc = ctypes.WINFUNCTYPE(
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.POINTER(wintypes.RECT),
+        ctypes.c_double
+    )
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+            ("szDevice", wintypes.WCHAR * 32)
+        ]
+
+    def enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(info)):
+            monitors.append({
+                'hMonitor': hMonitor,
+                'rcMonitor': info.rcMonitor,
+                'szDevice': info.szDevice
+            })
+        return 1
+
+    # Enumerate all display monitors
+    ctypes.windll.user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(enum_proc), 0)
+
+    # Sort monitors by their left coordinate
+    return sorted(monitors, key=lambda m: m['rcMonitor'].left)
+
+
 def is_obs_running():
     """Check if OBS is already running and responsive"""
     try:
@@ -95,6 +138,7 @@ def is_obs_running():
         return False
     except Exception:
         return False
+
 
 import os
 
