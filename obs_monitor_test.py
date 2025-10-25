@@ -11,7 +11,7 @@ PASSWORD = "Marana7ha" # Make sure this is correct
 
 def run_monitor_test():
     """
-    Connects to OBS and cycles through monitor indexes to identify them.
+    Connects to OBS, gets monitor geometry, and opens a test projector on each.
     """
     client = None
     try:
@@ -23,43 +23,41 @@ def run_monitor_test():
         print("Please ensure OBS is running and the WebSocket server is enabled with the correct password.")
         return
 
-    # The projector type to open. "Program" is a good neutral choice.
-    projector_type = "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM"
+    try:
+        monitors = client.get_monitor_list().monitors
+    except Exception as e:
+        print(f"Error getting monitor list from OBS: {e}")
+        client.disconnect()
+        return
 
-    # Number of monitors to test. We detected 5.
-    num_monitors = 5
+    print(f"\n--- Found {len(monitors)} Monitors ---")
+    print("The script will now open a test projector on each monitor.")
+    print("Use the coordinates (e.g., monitor_x, monitor_y) to update your config.json.\n")
 
-    print("\n--- Starting Monitor Index Test ---")
-    print("A projector window will be opened for each monitor index.")
-    print("Please note which monitor the projector appears on for each index.\n")
+    for i, monitor in enumerate(monitors):
+        x = monitor.get('monitorPositionX')
+        y = monitor.get('monitorPositionY')
+        width = monitor.get('monitorWidth')
+        height = monitor.get('monitorHeight')
 
-    for i in range(num_monitors):
         print(f"--> Testing Monitor Index: {i}")
+        print(f"    Coordinates: (x: {x}, y: {y})")
+        print(f"    Resolution: {width}x{height}")
+        
         try:
-            # Open the projector
-            client.send(
-                "OpenVideoMixProjector",
-                {
-                    "videoMixType": projector_type,
-                    "monitorIndex": i,
-                },
-            )
-            print(f"    Projector command sent for index {i}. Please observe your monitors.")
-
-            # Wait for a few seconds for the next one
-            time.sleep(3)
+            # Open a projector on this monitor
+            client.send("OpenVideoMixProjector", {
+                "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM",
+                "monitorIndex": i,
+            })
+            print(f"    A test projector should now be open on this monitor.")
+            time.sleep(4) # Wait for user to see
 
         except Exception as e:
             print(f"    Error opening projector for index {i}: {e}")
-            print("    This could mean the index is invalid or OBS returned an error.")
-            time.sleep(2)
-
 
     print("\n--- Test Complete ---")
-    print("The script has finished cycling through all indexes.")
-    print("IMPORTANT: Please close all the opened 'Program (Projector)' windows manually.")
-    print("Once you have your list of which index corresponds to which monitor, you can update your config.json.")
-
+    print("Please close all the opened 'Program (Projector)' windows manually.")
 
     if client:
         client.disconnect()

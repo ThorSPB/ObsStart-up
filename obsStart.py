@@ -52,12 +52,12 @@ def load_config():
     """Loads the configuration from the JSON file, or creates it if it doesn't exist."""
     global CONFIG
     config_path = get_config_path()
-    # NOTE: The 'monitor' index in the config corresponds to the physical monitor's
-    # position, sorted from left to right (0 = leftmost, 1 = second from left, etc.).
+    # NOTE: The configuration now uses monitor coordinates (e.g., 0, 1920) to identify
+    # the target monitor. Use the obs_monitor_test.py script to find the correct coordinates.
     default_config = {
-        "2": {"title": "Program (Projector)", "type": "program", "monitor": 3},
-        "3": {"title": "Scene Projector (Proiector)", "type": "scene", "monitor": 1, "scene": "Proiector"},
-        "4": {"title": "Scene Projector (TV Sala)", "type": "scene", "monitor": 4, "scene": "TV Sala"}
+        "2": {"title": "Program (Projector)", "type": "program", "monitor_x": 0, "monitor_y": 0},
+        "3": {"title": "Scene Projector (Proiector)", "type": "scene", "monitor_x": 1920, "monitor_y": 0, "scene": "Proiector"},
+        "4": {"title": "Scene Projector (TV Sala)", "type": "scene", "monitor_x": -1920, "monitor_y": 0, "scene": "TV Sala"}
     }
 
     if os.path.exists(config_path):
@@ -124,6 +124,29 @@ def get_monitors_sorted():
     return sorted(monitors, key=lambda m: m['rcMonitor'].left)
 
 
+def get_monitor_index_from_coords(x, y, client):
+    """
+    Finds the OBS monitor index that corresponds to a given (x, y) coordinate.
+    """
+    try:
+        # Get the list of monitors from OBS
+        monitors = client.get_monitor_list().monitors
+
+        for i, monitor in enumerate(monitors):
+            if monitor.get('monitorPositionX') == x and monitor.get('monitorPositionY') == y:
+                print(f"  ✅ Found monitor index {i} for coordinates ({x}, {y})")
+                return i
+        
+        print(f"  ⚠️ No monitor found in OBS for coordinates ({x}, {y}). Falling back to primary.")
+        return 0 # Default to primary if not found
+        
+    except Exception as e:
+        print(f"  ❌ Error getting monitor index from OBS: {e}")
+        print("  Falling back to primary monitor (index 0).")
+        return 0
+
+
+
 def get_primary_monitor_rect():
     """
     Finds the rectangle of the primary display monitor.
@@ -153,29 +176,38 @@ def get_primary_monitor_rect():
     ctypes.windll.user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(enum_proc), 0)
     return primary_rect
 
-def check_and_correct_projector_positions():
+def check_and_correct_projector_positions(client):
     """
     Verifies that projectors are on the correct monitor and closes them if they are misplaced.
     """
     print("\n\U0001f50d Verifying projector positions...")
-    primary_rect = get_primary_monitor_rect()
-    if not primary_rect:
-        print("  \u26a0\ufe0f Could not identify the primary monitor. Skipping position check.")
+    
+    try:
+        obs_monitors = client.get_monitor_list().monitors
+    except Exception as e:
+        print(f"  \u26a0\ufe0f Could not get monitor list from OBS: {e}. Skipping position check.")
         return
 
     open_projectors = get_obs_projector_windows()
     if not open_projectors:
         return # Nothing to check
 
-    # OBS Index 0 is the primary monitor, based on the user's test.
-    PRIMARY_MONITOR_OBS_INDEX = 0
-
     for config_key, config in CONFIG.items():
-        # We only care about projectors that are NOT supposed to be on the primary monitor.
-        if config.get('monitor') == PRIMARY_MONITOR_OBS_INDEX:
+        target_x = config.get('monitor_x')
+        target_y = config.get('monitor_y')
+
+        # Find the OBS monitor that matches the configured coordinates
+        target_monitor_geom = None
+        for monitor in obs_monitors:
+            if monitor.get('monitorPositionX') == target_x and monitor.get('monitorPositionY') == target_y:
+                target_monitor_geom = monitor
+                break
+        
+        if not target_monitor_geom:
+            print(f"  \u26a0\ufe0f No monitor found in OBS for coordinates ({target_x}, {target_y}) for '{config['title']}'.")
             continue
 
-        # Find the corresponding window for this config entry.
+        # Find the corresponding window for this config entry
         found_hwnd = None
         for proj_window in open_projectors:
             title_lower = proj_window['title'].lower()
@@ -195,15 +227,22 @@ def check_and_correct_projector_positions():
             # We found the window, now check its position.
             try:
                 window_rect = win32gui.GetWindowRect(found_hwnd)
-                
-                # Check if the window's center point is inside the primary monitor's rectangle.
                 window_center_x = (window_rect[0] + window_rect[2]) / 2
-                
-                if primary_rect.left <= window_center_x < primary_rect.right:
-                    # This window is on the primary monitor, but it shouldn't be.
-                    print(f"  \u26a0\ufe0f Misplaced projector detected: '{config['title']}' is on the primary monitor.")
+                window_center_y = (window_rect[1] + window_rect[3]) / 2
+
+                # Check if the window's center is inside the target monitor's geometry
+                mon_x = target_monitor_geom['monitorPositionX']
+                mon_y = target_monitor_geom['monitorPositionY']
+                mon_width = target_monitor_geom['monitorWidth']
+                mon_height = target_monitor_geom['monitorHeight']
+
+                if not (mon_x <= window_center_x < mon_x + mon_width and \
+                        mon_y <= window_center_y < mon_y + mon_height):
+                    
+                    print(f"  \u26a0\ufe0f Misplaced projector detected: '{config['title']}' is not on the correct monitor.")
                     print(f"  Closing '{config['title']}' so it can be reopened correctly.")
                     win32gui.PostMessage(found_hwnd, win32con.WM_CLOSE, 0, 0)
+
             except Exception as e:
                 print(f"  \u26a0\ufe0f Could not verify position for '{config['title']}': {e}")
 
@@ -432,23 +471,25 @@ def wait_for_projector_window(config, timeout=8):
     
     return None
 
-def open_projector_with_flash_suppression(client, monitor, config):
+def open_projector_with_flash_suppression(client, config):
     """Open a single projector and immediately suppress its taskbar flash"""
     try:
+        monitor_index = get_monitor_index_from_coords(config.get('monitor_x', 0), config.get('monitor_y', 0), client)
+
         # Open the projector
         if config["type"] == "program":
             client.send("OpenVideoMixProjector", {
                 "videoMixType": "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM",
-                "monitorIndex": config["monitor"]
+                "monitorIndex": monitor_index
             })
-            print(f"  📺 Opening Program projector on monitor {config['monitor']}")
+            print(f"  📺 Opening Program projector on monitor {monitor_index}")
             
         elif config["type"] == "scene":
             client.send("OpenSourceProjector", {
                 "sourceName": config["scene"],
-                "monitorIndex": config["monitor"]
+                "monitorIndex": monitor_index
             })
-            print(f"  📺 Opening {config['scene']} projector on monitor {config['monitor']}")
+            print(f"  📺 Opening {config['scene']} projector on monitor {monitor_index}")
         
         hwnd = wait_for_projector_window(config, timeout=6)
         
@@ -509,7 +550,7 @@ def open_missing_projectors_enhanced(client):
     for monitor in missing:
         config = CONFIG[monitor]
         
-        if open_projector_with_flash_suppression(client, monitor, config):
+        if open_projector_with_flash_suppression(client, config):
             success_count += 1
             time.sleep(0.1)
     
@@ -593,7 +634,7 @@ def monitor_projectors_continuously():
                     
                     for monitor in missing:
                         config = CONFIG[monitor]
-                        if open_projector_with_flash_suppression(client, monitor, config):
+                        if open_projector_with_flash_suppression(client, config):
                             print(f"  ✅ Recovered {config['title']}")
                             time.sleep(0.5)
                         else:
@@ -602,7 +643,7 @@ def monitor_projectors_continuously():
                 
                 # After attempting to open missing projectors, verify all positions.
                 time.sleep(1) # Give windows a moment to appear and settle.
-                check_and_correct_projector_positions()
+                check_and_correct_projector_positions(client)
 
             except Exception as e:
                 print(f"❌ Error during projector check: {e}")
@@ -657,7 +698,7 @@ def run_single_check():
 
             # Verify that projectors are on the correct monitors.
             time.sleep(1)
-            check_and_correct_projector_positions()
+            check_and_correct_projector_positions(client)
 
             if success:
                 print("\n\U0001f308 SUCCESS: All required projectors are now running!")

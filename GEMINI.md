@@ -38,9 +38,9 @@ The script uses a `config.json` file located in `%APPDATA%\ObsStartUp\`. If the 
 **Default `config.json`:**
 ```json
 {
-    "2": {"title": "Program (Projector)", "type": "program", "monitor": 3},
-    "3": {"title": "Scene Projector (Proiector)", "type": "scene", "monitor": 1, "scene": "Proiector"},
-    "4": {"title": "Scene Projector (TV Sala)", "type": "scene", "monitor": 4, "scene": "TV Sala"}
+    "2": {"title": "Program (Projector)", "type": "program", "monitor_x": 0, "monitor_y": 0},
+    "3": {"title": "Scene Projector (Proiector)", "type": "scene", "monitor_x": 1920, "monitor_y": 0, "scene": "Proiector"},
+    "4": {"title": "Scene Projector (TV Sala)", "type": "scene", "monitor_x": -1920, "monitor_y": 0, "scene": "TV Sala"}
 }
 ```
 
@@ -57,23 +57,21 @@ You can configure the script's behavior by changing the `MONITOR_MODE` variable 
 *   `MONITOR_MODE = True`: Runs the script in continuous monitoring mode.
 *   `MONITOR_MODE = False`: Runs the script as a single check.
 
-## A Note on Monitor Indexing
+## A Note on Monitor Identification
 
-A critical part of this script's functionality is opening projectors on specific monitors, which is defined by the `monitor` index in the `config.json` file.
+A critical part of this script's functionality is opening projectors on specific monitors. Instead of relying on unpredictable monitor indexes, the script now uses monitor coordinates (e.g., `monitor_x: 1920`, `monitor_y: 0`) to identify the correct screen.
 
-It has been observed that OBS Studio does not always number monitors in a predictable way (e.g., simple left-to-right order). The index OBS uses may not match the order shown in Windows Display Settings or the physical arrangement of the monitors.
+If you find that projectors are opening on the wrong screens, you must find the correct coordinates for each monitor. This project now includes a diagnostic script to help with this.
 
-If you find that projectors are opening on the wrong screens, you must find the correct monitor index that OBS is using. This project now includes a diagnostic script to help with this.
-
-**To find the correct monitor indexes:**
+**To find the correct monitor coordinates:**
 1.  Make sure OBS is running.
 2.  Run the `obs_monitor_test.py` script:
     ```bash
     python obs_monitor_test.py
     ```
-3.  The script will attempt to open a projector on each monitor index, starting from 0.
-4.  Observe which monitor the projector appears on for each index and note the mapping.
-5.  Update the `monitor` values in your `config.json` with the correct indexes you discovered.
+3.  The script will open a test projector on each of your monitors and print its coordinates and resolution.
+4.  Observe which monitor the projector appears on and note the `x` and `y` coordinates for it.
+5.  Update the `monitor_x` and `monitor_y` values in your `config.json` with the correct coordinates you discovered.
 
 ## Development Conventions
 
