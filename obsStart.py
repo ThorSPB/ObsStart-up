@@ -10,7 +10,85 @@ import ctypes
 from ctypes import wintypes
 from obsws_python import ReqClient
 import json
+import sys
 from monitor_utils import get_all_monitor_details
+
+
+# --- Global State for Graceful Shutdown ---
+SHUTDOWN_REQUESTED = False
+OBS_PROCESS = None
+OBSBOT_PROCESS = None
+WEBSOCKET_CLIENT = None
+
+
+def shutdown_handler(ctrl_type):
+    """Callback function to handle console events (like Ctrl+C, close, shutdown)."""
+    global SHUTDOWN_REQUESTED
+    if SHUTDOWN_REQUESTED:
+        return True # Avoid running shutdown logic multiple times
+
+    print(f"\n🚨 Shutdown signal received (Type: {ctrl_type}). Initiating graceful shutdown...")
+    SHUTDOWN_REQUESTED = True
+    
+    # Give the main loop a moment to see the flag
+    time.sleep(0.25)
+
+    # 1. Close all projector windows
+    try:
+        projectors = get_obs_projector_windows()
+        if projectors:
+            print(f"  -> Closing {len(projectors)} projector windows...")
+            for proj in projectors:
+                win32gui.PostMessage(proj['hwnd'], win32con.WM_CLOSE, 0, 0)
+            time.sleep(1) # Give them a moment to close
+    except Exception as e:
+        print(f"  ⚠️ Error closing projector windows: {e}")
+
+    # 2. Disconnect WebSocket client
+    global WEBSOCKET_CLIENT
+    if WEBSOCKET_CLIENT:
+        try:
+            print("  -> Disconnecting WebSocket client...")
+            WEBSOCKET_CLIENT.disconnect()
+        except Exception as e:
+            print(f"  ⚠️ Error disconnecting websocket: {e}")
+
+    # 3. Terminate OBS process
+    global OBS_PROCESS
+    # Re-check for the process in case it was started externally
+    if not OBS_PROCESS or not OBS_PROCESS.is_running():
+        is_obs_running() # This will populate the global OBS_PROCESS
+        
+    if OBS_PROCESS and OBS_PROCESS.is_running():
+        try:
+            print(f"  -> Terminating OBS process (PID: {OBS_PROCESS.pid})...")
+            OBS_PROCESS.terminate()
+            OBS_PROCESS.wait(timeout=5) # Wait for it to die
+            print("  -> OBS process terminated.")
+        except psutil.NoSuchProcess:
+            pass # Already gone
+        except Exception as e:
+            print(f"  ⚠️ Error terminating OBS: {e}")
+
+    # 4. Terminate OBSBOT process
+    global OBSBOT_PROCESS
+    # Re-check for the process
+    if not OBSBOT_PROCESS or not OBSBOT_PROCESS.is_running():
+        is_obsbot_running() # This will populate the global OBSBOT_PROCESS
+
+    if OBSBOT_PROCESS and OBSBOT_PROCESS.is_running():
+        try:
+            print(f"  -> Terminating OBSBOT Center process (PID: {OBSBOT_PROCESS.pid})...")
+            OBSBOT_PROCESS.terminate()
+            OBSBOT_PROCESS.wait(timeout=5)
+            print("  -> OBSBOT Center process terminated.")
+        except psutil.NoSuchProcess:
+            pass # Already gone
+        except Exception as e:
+            print(f"  ⚠️ Error terminating OBSBOT Center: {e}")
+
+    print("✅ Graceful shutdown complete. Exiting.")
+    return True # Indicate that the signal has been handled
 
 # Configuration - Verify these match your OBS setup
 HOST = "localhost"
@@ -249,18 +327,22 @@ def check_and_correct_projector_positions(client):
 
 
 def is_obs_running():
-    """Check if OBS is already running and responsive"""
+    """Check if OBS is already running and store the process object."""
+    global OBS_PROCESS
     try:
         for proc in psutil.process_iter(['name', 'status']):
             proc_name = proc.info['name'].lower()
             if 'obs64.exe' in proc_name or 'obs.exe' in proc_name:
                 try:
                     if proc.status() in [psutil.STATUS_RUNNING, psutil.STATUS_SLEEPING]:
+                        OBS_PROCESS = proc
                         return True
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
+        OBS_PROCESS = None
         return False
     except Exception:
+        OBS_PROCESS = None
         return False
 
 
@@ -415,11 +497,14 @@ def start_obs():
         return False
 
 def connect_to_obs_websocket(max_retries=5):
-    """Connect to OBS WebSocket with retries"""
+    """Connect to OBS WebSocket with retries and store the client."""
+    global WEBSOCKET_CLIENT
     for attempt in range(max_retries):
+        if SHUTDOWN_REQUESTED: return None
         try:
             client = ReqClient(host=HOST, port=PORT, password=PASSWORD)
             print("✅ Connected to OBS WebSocket")
+            WEBSOCKET_CLIENT = client
             return client
         except Exception as e:
             print(f"⏳ WebSocket connection attempt {attempt + 1}/{max_retries} failed: {e}")
@@ -428,6 +513,7 @@ def connect_to_obs_websocket(max_retries=5):
             else:
                 print("❌ Failed to connect to OBS WebSocket after all retries")
                 print("💡 Make sure OBS WebSocket server is enabled in OBS settings")
+                WEBSOCKET_CLIENT = None
                 return None
 
 def get_obs_projector_windows():
@@ -618,170 +704,172 @@ def verify_projectors_exist():
     return success, projectors
 
 def monitor_projectors_continuously():
-    """Continuously monitor and maintain projectors"""
-    print(f"🛡️ Starting continuous monitoring mode (checking every {CHECK_INTERVAL} seconds)")
-    print("💡 This will run in the background and auto-recover any closed projectors")
-    print("💡 If you close OBS, the script will automatically stop monitoring")
-    print("💡 Press Ctrl+C to stop monitoring manually\n")
+    """Continuously monitor and maintain projectors until a shutdown is requested."""
+    global WEBSOCKET_CLIENT # This function will now manage the global client connection
+
+    print(f"\n🛡️ Starting continuous monitoring mode (checking every {CHECK_INTERVAL} seconds)")
+    print("💡 This will run in the background. Close window or press Ctrl+C for graceful shutdown.")
     
-    if STARTUP_DELAY > 0:
+    if STARTUP_DELAY > 0 and not SHUTDOWN_REQUESTED:
         print(f"⏳ Startup delay: waiting {STARTUP_DELAY} seconds before first check...")
         time.sleep(STARTUP_DELAY)
     
-    client = None
     check_count = 1
     
-    try:
-        while True:
-            print(f"\n🔍 Monitor Check #{check_count} - {time.strftime('%H:%M:%S')}")
+    while not SHUTDOWN_REQUESTED:
+        print(f"\n🔍 Monitor Check #{check_count} - {time.strftime('%H:%M:%S')}")
+        
+        if not is_obs_running():
+            print("🛑 OBS has been closed - stopping monitoring.")
+            break
+        
+        if WEBSOCKET_CLIENT is None:
+            connect_to_obs_websocket(max_retries=2) # This populates the global client
+            if WEBSOCKET_CLIENT is None:
+                print("❌ WebSocket connection failed, will retry next cycle.")
+                check_count += 1
+                if not SHUTDOWN_REQUESTED: time.sleep(CHECK_INTERVAL)
+                continue
+        
+        try:
+            monitor_details = get_all_monitor_details()
+            missing, found = check_missing_projectors()
             
-            if not is_obs_running():
-                print("🛑 OBS has been closed - stopping monitoring gracefully")
-                print("💡 To restart OBS and monitoring, run the script again")
-                break
+            if not missing:
+                print("✅ All projectors running correctly")
             else:
-                print("🚀 OBS still running")
-
-            if client is None:
-                client = connect_to_obs_websocket(max_retries=2)
-                if not client:
-                    print("❌ WebSocket connection failed, will retry next cycle")
-                    time.sleep(CHECK_INTERVAL)
-                    check_count += 1
-                    continue
-            
-            try:
-                # Get current monitor and projector status at the start of each check
-                monitor_details = get_all_monitor_details()
-                missing, found = check_missing_projectors()
+                print(f"⚠️ Missing projectors detected: {missing}")
                 
-                if not missing:
-                    print("✅ All projectors running correctly")
-                else:
-                    print(f"⚠️ Missing projectors detected: {missing}")
-                    print(f"📋 Currently running: {found}")
+                for monitor_id in missing:
+                    if SHUTDOWN_REQUESTED: break
+                    config = CONFIG[monitor_id]
+                    result = open_projector_with_flash_suppression(WEBSOCKET_CLIENT, config, monitor_details)
                     
-                    if not is_obs_running():
-                        print("🛑 OBS was closed during check - stopping monitoring gracefully")
-                        break
-                    
-                    for monitor_id in missing:
-                        config = CONFIG[monitor_id]
-                        # This function now uses the monitor details to decide whether to act
-                        result = open_projector_with_flash_suppression(client, config, monitor_details)
-                        
-                        if result is True:
-                            print(f"  ✅ Recovered {config['title']}")
-                            time.sleep(0.5)
-                        elif result is False:
-                            # A hard error occurred, likely a connection issue.
-                            print("  ❌ An error occurred. Will try to reconnect on the next cycle.")
-                            client = None # Force re-connection
-                            break # End this check cycle and start a new one
-                
-                # If the client connection was dropped, skip the position check for this cycle
-                if client is None:
-                    check_count += 1
-                    time.sleep(CHECK_INTERVAL)
-                    continue
-
-                # After attempting to open missing projectors, verify all positions.
-                time.sleep(1) # Give windows a moment to appear and settle.
-                check_and_correct_projector_positions(client)
-
-            except Exception as e:
-                print(f"❌ Error during projector check: {e}")
-                client = None # Force re-connection on next loop
+                    if result is True:
+                        time.sleep(0.5)
+                    elif result is False:
+                        print("  ❌ An error occurred during projector opening. Will try to reconnect.")
+                        try: WEBSOCKET_CLIENT.disconnect()
+                        except: pass
+                        WEBSOCKET_CLIENT = None
+                        break 
             
-            check_count += 1
+            if SHUTDOWN_REQUESTED: break
+
+            if WEBSOCKET_CLIENT is None: # If connection was dropped
+                check_count += 1
+                if not SHUTDOWN_REQUESTED: time.sleep(CHECK_INTERVAL)
+                continue
+
+            time.sleep(1) 
+            if not SHUTDOWN_REQUESTED:
+                check_and_correct_projector_positions(WEBSOCKET_CLIENT)
+
+        except Exception as e:
+            print(f"❌ Error during projector check: {e}")
+            if WEBSOCKET_CLIENT:
+                try: WEBSOCKET_CLIENT.disconnect()
+                except: pass
+            WEBSOCKET_CLIENT = None
+        
+        check_count += 1
+        if not SHUTDOWN_REQUESTED:
             time.sleep(CHECK_INTERVAL)
             
-    except KeyboardInterrupt:
-        print("\n🛑 Monitoring stopped by user")
-    except Exception as e:
-        print(f"\n💥 Monitor crashed: {e}")
-    finally:
-        if client:
-            try:
-                client.disconnect()
-            except:
-                pass
-        print("🔚 Monitoring ended")
+    print("🔚 Monitoring loop ended.")
 
 def is_obsbot_running():
-    """Check if OBSBOT Center is already running"""
+    """Check if OBSBOT Center is already running and store the process object."""
+    global OBSBOT_PROCESS
     for proc in psutil.process_iter(['name']):
         try:
             if proc.info['name'] and 'obsbot' in proc.info['name'].lower():
+                OBSBOT_PROCESS = proc
                 return True
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
+    OBSBOT_PROCESS = None
     return False
 
 def run_single_check():
-    """Run a single check and exit"""
+    """Run a single check, managed by the shutdown handler."""
+    global WEBSOCKET_CLIENT
     print("🎬 OBS Projector Auto-Manager")
     print("=" * 50)
     
+    if SHUTDOWN_REQUESTED: return
     if not start_obs():
         print("\n💥 FAILURE: Could not start OBS")
-        input("Press Enter to exit...")
         return
-    
-    client = connect_to_obs_websocket()
-    if not client:
+
+    if SHUTDOWN_REQUESTED: return
+    connect_to_obs_websocket()
+    if not WEBSOCKET_CLIENT:
         print("\n💥 FAILURE: Could not connect to OBS")
-        input("Press Enter to exit...")
         return
     
     try:
+        if SHUTDOWN_REQUESTED: return
         print("\n🔍 Checking existing projectors...")
-        if open_missing_projectors_enhanced(client):
-            time.sleep(2)
-            success, projectors = verify_projectors_exist()
+        open_missing_projectors_enhanced(WEBSOCKET_CLIENT)
+        
+        if SHUTDOWN_REQUESTED: return
+        time.sleep(2)
+        verify_projectors_exist()
 
-            # Verify that projectors are on the correct monitors.
-            time.sleep(1)
-            check_and_correct_projector_positions(client)
+        if SHUTDOWN_REQUESTED: return
+        time.sleep(1)
+        check_and_correct_projector_positions(WEBSOCKET_CLIENT)
 
-            if success:
-                print("\n\U0001f308 SUCCESS: All required projectors are now running!")
-            else:
-                print(f"\n\u26a0\ufe0f CHECK NEEDED: {len(projectors)} projectors currently running")
-                print("\U0001f4a1 Some projectors might not have opened properly")
-        else:
-            print("\n💥 FAILURE: Could not open missing projectors")
-            
     except Exception as e:
-        print(f"\n💥 UNEXPECTED ERROR: {e}")
+        print(f"\n💥 UNEXPECTED ERROR during single check: {e}")
         
     finally:
-        try:
-            client.disconnect()
-        except:
-            pass
+        # Disconnect only if not in monitor mode and no shutdown is happening
+        if not MONITOR_MODE and not SHUTDOWN_REQUESTED:
+            if WEBSOCKET_CLIENT:
+                try: WEBSOCKET_CLIENT.disconnect()
+                except: pass
+            WEBSOCKET_CLIENT = None
 
-    # Launch OBSBOT Center after projectors are opened if not already running
-    obsbot_shortcut = r"C:\Users\Public\Desktop\OBSBOT Center.lnk"
+    if SHUTDOWN_REQUESTED: return
+    
+    # Launch OBSBOT Center
     if not is_obsbot_running():
+        print("🚀 Launching OBSBOT Center...")
         try:
+            obsbot_shortcut = r"C:\Users\Public\Desktop\OBSBOT Center.lnk"
             os.startfile(obsbot_shortcut)
-            print("🚀 Launched OBSBOT Center")
+            # Give it a moment to start and then find the process
+            time.sleep(2)
+            is_obsbot_running() 
         except Exception as e:
             print(f"❌ Failed to launch OBSBOT Center: {e}")
     else:
-        print("\nℹ️ OBSBOT Center is already running, not launching another instance")
+        print("ℹ️ OBSBOT Center is already running.")
 
-    print("\n✅ Script completed!\n")
+    if not MONITOR_MODE:
+        print("\n✅ Single run check complete!")
 
 def main():
     """Main function - chooses between single run or continuous monitoring"""
+    # Register the shutdown handler for graceful exit on Ctrl+C, close, etc.
+    win32api.SetConsoleCtrlHandler(shutdown_handler, True)
+
     load_config()
+
+    # If a shutdown is requested during setup, don't proceed.
+    if SHUTDOWN_REQUESTED:
+        return
+
     if MONITOR_MODE:
         run_single_check()
-        monitor_projectors_continuously()
+        if not SHUTDOWN_REQUESTED:
+            monitor_projectors_continuously()
     else:
         run_single_check()
+
+    print("\n✅ Script completed or exited via shutdown request.")
 
 if __name__ == "__main__":
     main()
