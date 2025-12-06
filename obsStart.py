@@ -10,6 +10,7 @@ import ctypes
 from ctypes import wintypes
 from obsws_python import ReqClient
 import json
+from monitor_utils import get_all_monitor_details
 
 # Configuration - Verify these match your OBS setup
 HOST = "localhost"
@@ -471,10 +472,27 @@ def wait_for_projector_window(config, timeout=8):
     
     return None
 
-def open_projector_with_flash_suppression(client, config):
-    """Open a single projector and immediately suppress its taskbar flash"""
+def open_projector_with_flash_suppression(client, config, monitor_details):
+    """
+    Open a single projector and immediately suppress its taskbar flash.
+    Returns:
+        - True: If the projector was opened successfully.
+        - False: If there was an error during the process.
+        - None: If the projector was skipped because the monitor is off.
+    """
     try:
-        monitor_index = get_monitor_index_from_coords(config.get('monitor_x', 0), config.get('monitor_y', 0), client)
+        target_x = config.get('monitor_x', 0)
+        target_y = config.get('monitor_y', 0)
+
+        # Check if the target monitor is active before trying to open it.
+        target_monitor = next((m for m in monitor_details if m['rect'].left == target_x and m['rect'].top == target_y), None)
+        
+        # If monitor is found and not active, skip it.
+        if target_monitor and not target_monitor['is_active']:
+            print(f"  💤 Skipping '{config['title']}' because monitor at ({target_x}, {target_y}) is off or in power-save mode.")
+            return None  # Special return value for "skipped"
+
+        monitor_index = get_monitor_index_from_coords(target_x, target_y, client)
 
         # Open the projector
         if config["type"] == "program":
@@ -495,7 +513,6 @@ def open_projector_with_flash_suppression(client, config):
         
         if hwnd:
             suppress_taskbar_flash_aggressive(hwnd, max_attempts=1)
-            
             return True
         else:
             print(f"  ⚠️ Could not find window handle for {config['title']}")
@@ -533,28 +550,42 @@ def check_missing_projectors():
     return missing, found
 
 def open_missing_projectors_enhanced(client):
-    """Enhanced version with better flash suppression"""
+    """Enhanced version with better flash suppression and monitor status check"""
+    print("💻 Checking monitor power states...")
+    try:
+        monitor_details = get_all_monitor_details()
+        active_monitors_count = sum(1 for m in monitor_details if m['is_active'])
+        print(f"  → Found {len(monitor_details)} total monitors, {active_monitors_count} are active.")
+    except Exception as e:
+        print(f"  ⚠️ Could not check monitor power states: {e}")
+        print("     (Is the 'wmi' package installed? Falling back to basic check.)")
+        monitor_details = [] # Fallback to empty list
+
     missing, found = check_missing_projectors()
     
     if not missing:
-        print("✅ All projectors are already running!")
-        # Still apply suppression to existing projectors
-        return True
+        print("✅ All required projectors are already running!")
+        return True # Indicates no action was needed, but it's not a failure.
     
     print(f"📋 Found projectors: {found}")
     print(f"🔍 Missing projectors: {missing}")
     print("🚀 Opening missing projectors with flash suppression:")
     
-    success_count = 0
+    any_opened = False
     
-    for monitor in missing:
-        config = CONFIG[monitor]
+    for monitor_id in missing:
+        config = CONFIG[monitor_id]
         
-        if open_projector_with_flash_suppression(client, config):
-            success_count += 1
-            time.sleep(0.1)
+        # In case WMI failed, create a dummy entry that will always be 'active'
+        if not monitor_details:
+            monitor_details = [{'rect': type('obj', (object,), {'left': config.get('monitor_x', 0), 'top': config.get('monitor_y', 0)})(), 'is_active': True}]
+
+        result = open_projector_with_flash_suppression(client, config, monitor_details)
+        if result is True:
+            any_opened = True
+            time.sleep(0.2) # Stagger opening projectors
     
-    return success_count > 0
+    return any_opened
 
 def verify_projectors_exist():
     """Check if projectors are actually running"""
@@ -620,6 +651,8 @@ def monitor_projectors_continuously():
                     continue
             
             try:
+                # Get current monitor and projector status at the start of each check
+                monitor_details = get_all_monitor_details()
                 missing, found = check_missing_projectors()
                 
                 if not missing:
@@ -632,22 +665,33 @@ def monitor_projectors_continuously():
                         print("🛑 OBS was closed during check - stopping monitoring gracefully")
                         break
                     
-                    for monitor in missing:
-                        config = CONFIG[monitor]
-                        if open_projector_with_flash_suppression(client, config):
+                    for monitor_id in missing:
+                        config = CONFIG[monitor_id]
+                        # This function now uses the monitor details to decide whether to act
+                        result = open_projector_with_flash_suppression(client, config, monitor_details)
+                        
+                        if result is True:
                             print(f"  ✅ Recovered {config['title']}")
                             time.sleep(0.5)
-                        else:
-                            client = None
-                            break
+                        elif result is False:
+                            # A hard error occurred, likely a connection issue.
+                            print("  ❌ An error occurred. Will try to reconnect on the next cycle.")
+                            client = None # Force re-connection
+                            break # End this check cycle and start a new one
                 
+                # If the client connection was dropped, skip the position check for this cycle
+                if client is None:
+                    check_count += 1
+                    time.sleep(CHECK_INTERVAL)
+                    continue
+
                 # After attempting to open missing projectors, verify all positions.
                 time.sleep(1) # Give windows a moment to appear and settle.
                 check_and_correct_projector_positions(client)
 
             except Exception as e:
                 print(f"❌ Error during projector check: {e}")
-                client = None
+                client = None # Force re-connection on next loop
             
             check_count += 1
             time.sleep(CHECK_INTERVAL)

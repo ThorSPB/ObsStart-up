@@ -1,3 +1,4 @@
 psutil
 obsws-python
 pywin32
+wmi
