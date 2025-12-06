@@ -721,7 +721,7 @@ def run_single_check():
     obsbot_shortcut = r"C:\Users\Public\Desktop\OBSBOT Center.lnk"
     if not is_obsbot_running():
         try:
-            subprocess.Popen([obsbot_shortcut], shell=True)
+            os.startfile(obsbot_shortcut)
             print("🚀 Launched OBSBOT Center")
         except Exception as e:
             print(f"❌ Failed to launch OBSBOT Center: {e}")
