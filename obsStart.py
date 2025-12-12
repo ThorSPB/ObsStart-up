@@ -23,29 +23,26 @@ WEBSOCKET_CLIENT = None
 
 def shutdown_handler(ctrl_type):
     """Callback function to handle console events (like Ctrl+C, close, shutdown)."""
-    global SHUTDOWN_REQUESTED
+    global SHUTDOWN_REQUESTED, WEBSOCKET_CLIENT, OBS_PROCESS, OBSBOT_PROCESS
     if SHUTDOWN_REQUESTED:
-        return True # Avoid running shutdown logic multiple times
+        return True
 
-    print(f"\n🚨 Shutdown signal received (Type: {ctrl_type}). Initiating graceful shutdown...")
+    print(f"\n🚨 Shutdown signal received (Type: {ctrl_type}). Initiating shutdown...")
     SHUTDOWN_REQUESTED = True
-    
-    # Give the main loop a moment to see the flag
     time.sleep(0.25)
 
-    # 1. Close all projector windows
+    # 1. Close projector windows
     try:
         projectors = get_obs_projector_windows()
         if projectors:
             print(f"  -> Closing {len(projectors)} projector windows...")
             for proj in projectors:
                 win32gui.PostMessage(proj['hwnd'], win32con.WM_CLOSE, 0, 0)
-            time.sleep(1) # Give them a moment to close
+            time.sleep(1)
     except Exception as e:
         print(f"  ⚠️ Error closing projector windows: {e}")
 
-    # 2. Disconnect WebSocket client
-    global WEBSOCKET_CLIENT
+    # 2. Disconnect WebSocket
     if WEBSOCKET_CLIENT:
         try:
             print("  -> Disconnecting WebSocket client...")
@@ -53,42 +50,47 @@ def shutdown_handler(ctrl_type):
         except Exception as e:
             print(f"  ⚠️ Error disconnecting websocket: {e}")
 
+    # Give apps a moment to process projector/websocket closures before terminating
+    print("  -> Allowing 2 seconds for applications to process closures...")
+    time.sleep(2)
+
     # 3. Terminate OBS process
-    global OBS_PROCESS
-    # Re-check for the process in case it was started externally
-    if not OBS_PROCESS or not OBS_PROCESS.is_running():
-        is_obs_running() # This will populate the global OBS_PROCESS
-        
+    print("  -> Terminating OBS process...")
+    is_obs_running()
     if OBS_PROCESS and OBS_PROCESS.is_running():
         try:
-            print(f"  -> Terminating OBS process (PID: {OBS_PROCESS.pid})...")
             OBS_PROCESS.terminate()
-            OBS_PROCESS.wait(timeout=5) # Wait for it to die
+            OBS_PROCESS.wait(timeout=5)
             print("  -> OBS process terminated.")
-        except psutil.NoSuchProcess:
-            pass # Already gone
         except Exception as e:
             print(f"  ⚠️ Error terminating OBS: {e}")
 
-    # 4. Terminate OBSBOT process
-    global OBSBOT_PROCESS
-    # Re-check for the process
-    if not OBSBOT_PROCESS or not OBSBOT_PROCESS.is_running():
-        is_obsbot_running() # This will populate the global OBSBOT_PROCESS
+    # 4. Shutdown OBSBOT Center
+    print("  -> Initiating OBSBOT Center shutdown...")
+    is_obsbot_running()
+    if OBSBOT_PROCESS:
+        obsbot_hwnd = find_obsbot_main_window()
+        if obsbot_hwnd:
+            print("  -> Sending WM_CLOSE to OBSBOT Center window...")
+            win32gui.PostMessage(obsbot_hwnd, win32con.WM_CLOSE, 0, 0)
+            try:
+                OBSBOT_PROCESS.wait(timeout=8)
+                print("  -> OBSBOT Center process exited gracefully.")
+            except psutil.TimeoutExpired:
+                print("  -> OBSBOT Center did not exit gracefully, forcing termination.")
+                try:
+                    OBSBOT_PROCESS.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+        else:
+            print("  -> OBSBOT Center window not found, forcing termination.")
+            try:
+                OBSBOT_PROCESS.terminate()
+            except psutil.NoSuchProcess:
+                pass
 
-    if OBSBOT_PROCESS and OBSBOT_PROCESS.is_running():
-        try:
-            print(f"  -> Terminating OBSBOT Center process (PID: {OBSBOT_PROCESS.pid})...")
-            OBSBOT_PROCESS.terminate()
-            OBSBOT_PROCESS.wait(timeout=5)
-            print("  -> OBSBOT Center process terminated.")
-        except psutil.NoSuchProcess:
-            pass # Already gone
-        except Exception as e:
-            print(f"  ⚠️ Error terminating OBSBOT Center: {e}")
-
-    print("✅ Graceful shutdown complete. Exiting.")
-    return True # Indicate that the signal has been handled
+    print("✅ Shutdown complete. Exiting.")
+    return True
 
 # Configuration - Verify these match your OBS setup
 HOST = "localhost"
@@ -348,17 +350,22 @@ def is_obs_running():
 
 import os
 
-def remove_obs_safe_mode_flag():
-    """Removes the OBS 'safe_mode' file to suppress safe mode prompt."""
-    safe_mode_file = os.path.expanduser(r"~\AppData\Roaming\obs-studio\safe_mode")
-    if os.path.exists(safe_mode_file):
-        try:
-            os.remove(safe_mode_file)
-            print("🧹 Removed 'safe_mode' file")
-        except Exception as e:
-            print(f"⚠️ Couldn't remove 'safe_mode': {e}")
+def remove_obs_crash_sentinel():
+    """Removes the OBS crash sentinel file to suppress the safe mode prompt."""
+    sentinel_dir = os.path.join(os.getenv('APPDATA'), "obs-studio", ".sentinel")
+    if os.path.isdir(sentinel_dir):
+        # Find the run file within the directory (e.g., run_xxxxxxxx-xxxx-...)
+        for filename in os.listdir(sentinel_dir):
+            if filename.startswith("run_"):
+                file_path = os.path.join(sentinel_dir, filename)
+                try:
+                    os.remove(file_path)
+                    print(f"🧹 Removed OBS crash sentinel file: {filename}")
+                    return # Assume only one such file exists
+                except Exception as e:
+                    print(f"⚠️ Couldn't remove OBS crash sentinel file '{filename}': {e}")
     else:
-        print("✅ No 'safe_mode' file present")
+        print("✅ No OBS crash sentinel directory found.")
 
 def focus_window(hwnd):
     """Restore and focus hwnd reliably, even across processes."""
@@ -433,13 +440,38 @@ def suppress_taskbar_flash_aggressive(hwnd, max_attempts=3):
     except Exception as e:
         print(f"⚠️ Could not suppress flash for hwnd={hwnd}: {e}")
 
+def find_obs_main_window():
+    """Helper function to find the main OBS window handle."""
+    def callback(hwnd, extra):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            class_name = win32gui.GetClassName(hwnd)
+            if ("OBS" in title or "obs64" in title.lower()) and "Qt" in class_name:
+                extra.append(hwnd)
+        return True
+    hwnds = []
+    win32gui.EnumWindows(callback, hwnds)
+    return hwnds[0] if hwnds else None
+
+def find_obsbot_main_window():
+    """Helper function to find the main OBSBOT Center window handle."""
+    def callback(hwnd, extra):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            if "OBSBOT" in title and "Center" in title:
+                extra.append(hwnd)
+        return True
+    hwnds = []
+    win32gui.EnumWindows(callback, hwnds)
+    return hwnds[0] if hwnds else None
+
 def start_obs():
     """Start OBS if it's not already running"""
     if is_obs_running():
         print("✅ OBS is already running")
         return True
 
-    remove_obs_safe_mode_flag()
+    remove_obs_crash_sentinel()
     
     print("🚀 Starting OBS...")
     try:
@@ -450,18 +482,6 @@ def start_obs():
         time.sleep(4)
 
         # Find and focus OBS main window
-        def find_obs_main_window():
-            def callback(hwnd, extra):
-                if win32gui.IsWindowVisible(hwnd):
-                    title = win32gui.GetWindowText(hwnd)
-                    class_name = win32gui.GetClassName(hwnd)
-                    if ("OBS" in title or "obs64" in title.lower()) and "Qt" in class_name:
-                        extra.append(hwnd)
-                return True
-            hwnds = []
-            win32gui.EnumWindows(callback, hwnds)
-            return hwnds[0] if hwnds else None
-
         hwnd = find_obs_main_window()
         if hwnd:
             try:
@@ -674,32 +694,39 @@ def open_missing_projectors_enhanced(client):
     return any_opened
 
 def verify_projectors_exist():
-    """Check if projectors are actually running"""
+    """Check if projectors are actually running and correctly identified."""
     print("\n🔍 Verifying projectors:")
     
     projectors = get_obs_projector_windows()
-    found_configs = []
+    found_config_keys = []
     
     for proj in projectors:
         title = proj['title']
         print(f"  → Found window: {title}")
-        
         title_lower = title.lower()
-        if "program" in title_lower:
-            found_configs.append(2)
-        elif "proiector" in title_lower:
-            found_configs.append(3)
-        elif "tv sala" in title_lower:
-            found_configs.append(4)
-        
-        for monitor, config in CONFIG.items():
-            if config["type"] == "scene" and config["scene"].lower() in title_lower:
-                if monitor not in found_configs:
-                    found_configs.append(monitor)
-    
-    found_configs = list(set(found_configs))
-    success = len(found_configs) >= len(CONFIG) - 1
-    print(f"  → Expected: {len(CONFIG)}, Found matching: {len(found_configs)} {found_configs}")
+
+        # Iterate through config to find a match
+        for key, config in CONFIG.items():
+            # Check if this key has already been found
+            if key in found_config_keys:
+                continue
+
+            is_match = False
+            if config.get("type") == "program" and "program" in title_lower:
+                is_match = True
+            elif config.get("type") == "scene":
+                scene_name = config.get("scene", "").lower()
+                if scene_name and (scene_name in title_lower or scene_name.replace(" ", "") in title_lower.replace(" ", "")):
+                    is_match = True
+            
+            if is_match:
+                found_config_keys.append(key)
+                # Once a projector window matches a config, break inner loop to not match it with another config
+                break
+
+    unique_found_keys = list(set(found_config_keys))
+    success = len(unique_found_keys) >= len(CONFIG)
+    print(f"  → Expected: {len(CONFIG)}, Found matching: {len(unique_found_keys)} {unique_found_keys}")
     
     return success, projectors
 

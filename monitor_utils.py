@@ -109,7 +109,7 @@ def get_all_monitor_details():
     # 2. Get WMI monitor statuses
     wmi_statuses = {}
     try:
-        w = wmi.WMI(namespace="root\cimv2")
+        w = wmi.WMI(namespace=r"root\cimv2")
         for monitor in w.Win32_DesktopMonitor():
             # Availability=3 means "Running/Full Power"
             wmi_statuses[monitor.PNPDeviceID] = (monitor.Availability == 3)
